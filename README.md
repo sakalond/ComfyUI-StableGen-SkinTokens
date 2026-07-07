@@ -68,6 +68,12 @@ SKINTOKENS_OUTPUT_DIR=/path/to/ComfyUI/output
 Or copy `skintokens_config.example.json` to `skintokens_config.json` and edit
 the paths. Local config is ignored by git.
 
+During installation, the node writes `skintokens_config.json` as soon as it has
+chosen a SkinTokens checkout and Python environment. If a later dependency or
+model download step fails, the config remains with `"install_complete": false`.
+Rerunning the installer reuses those paths and flips the flag to `true` once the
+runtime is fully ready.
+
 The wrapper expects that this works:
 
 ```bash

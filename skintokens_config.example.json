@@ -1,5 +1,6 @@
 {
   "skintokens_root": "vendor/SkinTokens",
   "python": "vendor/skintokens_env/Scripts/python.exe",
-  "timeout": 3600
+  "timeout": 3600,
+  "install_complete": true
 }

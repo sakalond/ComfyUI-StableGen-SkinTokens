@@ -91,13 +91,19 @@ def _as_abs(path_value: str | os.PathLike, base: Path = NODE_DIR) -> Path:
     return path.resolve()
 
 
-def _write_config(root: Path, python_exe: Path, timeout: int = DEFAULT_TIMEOUT) -> None:
+def _write_config(
+    root: Path,
+    python_exe: Path,
+    timeout: int = DEFAULT_TIMEOUT,
+    install_complete: bool = True,
+) -> None:
     rel_root = os.path.relpath(root, NODE_DIR)
     rel_python = os.path.relpath(python_exe, NODE_DIR)
     data = {
         "skintokens_root": rel_root,
         "python": rel_python,
         "timeout": int(timeout),
+        "install_complete": bool(install_complete),
     }
     CONFIG_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     _log(f"Wrote runtime config: {CONFIG_PATH}")
@@ -112,9 +118,11 @@ def _env_config() -> tuple[Path, str, int] | None:
     return Path(root_raw).expanduser().resolve(), python_raw, timeout
 
 
-def _file_config() -> tuple[Path, str, int] | None:
+def _file_config(require_complete: bool = True) -> tuple[Path, str, int] | None:
     data = _read_json(CONFIG_PATH)
     if not data:
+        return None
+    if require_complete and data.get("install_complete") is False:
         return None
     root_raw = data.get("skintokens_root") or data.get("root")
     python_raw = data.get("python") or data.get("python_exe")
@@ -136,9 +144,9 @@ def _validate_config(config: tuple[Path, str, int]) -> tuple[Path, str, int]:
     return root, python_exe, timeout
 
 
-def configured_runtime() -> tuple[Path, str, int] | None:
+def configured_runtime(require_complete: bool = True) -> tuple[Path, str, int] | None:
     """Return env/config runtime if it is present and path-valid."""
-    config = _env_config() or _file_config()
+    config = _env_config() or _file_config(require_complete=require_complete)
     if not config:
         return None
     return _validate_config(config)
@@ -356,17 +364,19 @@ def _create_managed_python(venv_dir: Path = DEFAULT_VENV) -> Path:
 
 def _install_managed(root: Path) -> tuple[Path, str, int]:
     python_exe = _create_managed_python()
+    _write_config(root, python_exe, install_complete=False)
     _install_dependencies(python_exe, root)
     _download_models(python_exe, root)
-    _write_config(root, python_exe)
+    _write_config(root, python_exe, install_complete=True)
     return root, str(python_exe), DEFAULT_TIMEOUT
 
 
 def _install_comfy(root: Path) -> tuple[Path, str, int]:
     python_exe = Path(sys.executable).resolve()
+    _write_config(root, python_exe, install_complete=False)
     _install_dependencies(python_exe, root)
     _download_models(python_exe, root)
-    _write_config(root, python_exe)
+    _write_config(root, python_exe, install_complete=True)
     return root, str(python_exe), DEFAULT_TIMEOUT
 
 
@@ -422,9 +432,10 @@ def ensure_runtime(install_policy: str = "auto") -> tuple[Path, str, int]:
         if policy == "auto":
             python_exe = Path(sys.executable).resolve()
             if _python_version_ok(python_exe) and _python_has_runtime_deps(python_exe):
+                _write_config(root, python_exe, install_complete=False)
                 _prepare_attention_backend(python_exe, root, allow_install=False)
                 _download_models(python_exe, root)
-                _write_config(root, python_exe)
+                _write_config(root, python_exe, install_complete=True)
                 return root, str(python_exe), DEFAULT_TIMEOUT
             _log("Falling back to a managed SkinTokens environment.")
 
@@ -433,8 +444,9 @@ def ensure_runtime(install_policy: str = "auto") -> tuple[Path, str, int]:
 
 def doctor_text() -> str:
     lines = [f"Node directory: {NODE_DIR}"]
+    config_data = _read_json(CONFIG_PATH)
     try:
-        config = configured_runtime()
+        config = configured_runtime(require_complete=False)
     except Exception as exc:
         lines.append(f"Configured runtime: invalid ({exc})")
         config = None
@@ -448,6 +460,8 @@ def doctor_text() -> str:
     lines.append(f"SkinTokens root: {root}")
     lines.append(f"Python: {python_exe}")
     lines.append(f"Timeout: {timeout}")
+    if config_data:
+        lines.append(f"Install complete: {config_data.get('install_complete', True)}")
     lines.append(f"Python >=3.11: {_python_version_ok(python_exe)}")
     lines.append(f"Runtime imports: {_python_has_runtime_deps(python_exe)}")
     lines.append(f"flash-attn import: {_python_has_module(python_exe, 'flash_attn')}")

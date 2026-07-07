@@ -19,6 +19,7 @@ SKINTOKENS_REPO = "https://github.com/VAST-AI-Research/SkinTokens.git"
 DEFAULT_TIMEOUT = 3600
 
 INSTALL_POLICIES = ["auto", "managed", "comfy", "configured_only"]
+ATTENTION_BACKENDS = ["auto", "flash_attention_2", "sdpa"]
 
 
 def _log(message: str) -> None:
@@ -27,6 +28,16 @@ def _log(message: str) -> None:
 
 def _flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _attention_backend() -> str:
+    backend = os.environ.get("SKINTOKENS_ATTENTION_BACKEND", "auto").strip().lower()
+    if backend not in ATTENTION_BACKENDS:
+        raise RuntimeError(
+            f"Unknown SKINTOKENS_ATTENTION_BACKEND={backend!r}; "
+            f"expected one of {', '.join(ATTENTION_BACKENDS)}"
+        )
+    return backend
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> None:
@@ -167,7 +178,6 @@ def _python_has_runtime_deps(python_exe: str | Path) -> bool:
         "trimesh",
         "open3d",
         "huggingface_hub",
-        "flash_attn",
     ]
     code = "import " + ", ".join(imports)
     result = _run_capture([str(python_exe), "-c", code])
@@ -179,12 +189,115 @@ def _python_has_runtime_deps(python_exe: str | Path) -> bool:
     return False
 
 
+def _python_has_module(python_exe: str | Path, module: str) -> bool:
+    return _run_capture([str(python_exe), "-c", f"import {module}"]).returncode == 0
+
+
 def _has_models(root: Path) -> bool:
     expected = [
         root / "experiments" / "articulation_xl_quantization_256_token_4",
         root / "experiments" / "skin_vae_2_10_32768",
     ]
     return all(path.exists() for path in expected)
+
+
+def _apply_sdpa_attention_patch(root: Path) -> None:
+    """Patch SkinTokens to use PyTorch SDPA when flash-attn is unavailable.
+
+    Upstream TokenRig hardcodes Hugging Face `flash_attention_2` and imports
+    `flash_attn` at module import time. That is awkward on Windows, where
+    flash-attn often has to build from source. PyTorch's SDPA is slower and can
+    use more VRAM, but it lets Windows installs proceed without compiling
+    flash-attn.
+    """
+    replacements = {
+        root / "src" / "model" / "tokenrig.py": [
+            (
+                'attn_implementation="flash_attention_2"',
+                'attn_implementation="sdpa"',
+            ),
+            (
+                "try: from flash_attn_interface import flash_attn_func # type: ignore except Exception as e: "
+                "from flash_attn.flash_attn_interface import flash_attn_func as _flash_attn_func "
+                "def flash_attn_func(*args, **kwargs): res = _flash_attn_func(*args, **kwargs) return res, None",
+                "def flash_attn_func(*args, **kwargs):\n"
+                "    import torch.nn.functional as _F\n"
+                "    q, k, v = args[:3]\n"
+                "    dropout_p = kwargs.get('dropout_p', 0.0)\n"
+                "    softmax_scale = kwargs.get('softmax_scale', None)\n"
+                "    causal = kwargs.get('causal', False)\n"
+                "    if q.dim() == 4:\n"
+                "        out = _F.scaled_dot_product_attention(\n"
+                "            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),\n"
+                "            dropout_p=dropout_p, is_causal=causal, scale=softmax_scale,\n"
+                "        ).transpose(1, 2)\n"
+                "    else:\n"
+                "        out = _F.scaled_dot_product_attention(\n"
+                "            q, k, v, dropout_p=dropout_p, is_causal=causal, scale=softmax_scale,\n"
+                "        )\n"
+                "    return out, None\n",
+            ),
+        ],
+        root / "src" / "server" / "spec.py": [
+            (
+                '_attn_implementation="flash_attention_2"',
+                '_attn_implementation="sdpa"',
+            ),
+        ],
+    }
+
+    for path, pairs in replacements.items():
+        if not path.is_file():
+            raise RuntimeError(f"Cannot patch SkinTokens attention backend; missing {path}")
+        text = path.read_text(encoding="utf-8")
+        original = text
+        for old, new in pairs:
+            text = text.replace(old, new)
+        if text != original:
+            path.write_text(text, encoding="utf-8")
+            _log(f"Patched SkinTokens attention backend to SDPA in {path}")
+
+
+def _prepare_attention_backend(python_exe: str | Path, root: Path, allow_install: bool) -> None:
+    backend = _attention_backend()
+    if backend == "sdpa":
+        _apply_sdpa_attention_patch(root)
+        return
+
+    if backend == "auto" and os.name == "nt":
+        _log("Windows detected; using PyTorch SDPA instead of building flash-attn.")
+        _apply_sdpa_attention_patch(root)
+        return
+
+    if _flag("SKINTOKENS_SKIP_FLASH_ATTN_INSTALL"):
+        _log("SKINTOKENS_SKIP_FLASH_ATTN_INSTALL is set; using PyTorch SDPA.")
+        _apply_sdpa_attention_patch(root)
+        return
+
+    if _python_has_module(python_exe, "flash_attn"):
+        return
+
+    if not allow_install:
+        if backend == "flash_attention_2":
+            return
+        _log("flash-attn is not installed in this Python; using PyTorch SDPA.")
+        _apply_sdpa_attention_patch(root)
+        return
+
+    try:
+        _run([
+            str(python_exe),
+            "-m",
+            "pip",
+            "install",
+            "flash-attn",
+            "--no-build-isolation",
+        ])
+    except RuntimeError:
+        if backend == "flash_attention_2":
+            raise
+        _log("flash-attn install failed; using PyTorch SDPA fallback.")
+        _apply_sdpa_attention_patch(root)
 
 
 def _install_dependencies(python_exe: str | Path, root: Path) -> None:
@@ -214,16 +327,7 @@ def _install_dependencies(python_exe: str | Path, root: Path) -> None:
         ])
 
     _run([str(python_exe), "-m", "pip", "install", "-r", str(root / "requirements.txt")])
-
-    if not _flag("SKINTOKENS_SKIP_FLASH_ATTN_INSTALL"):
-        _run([
-            str(python_exe),
-            "-m",
-            "pip",
-            "install",
-            "flash-attn",
-            "--no-build-isolation",
-        ])
+    _prepare_attention_backend(python_exe, root, allow_install=True)
 
 
 def _download_models(python_exe: str | Path, root: Path) -> None:
@@ -318,6 +422,7 @@ def ensure_runtime(install_policy: str = "auto") -> tuple[Path, str, int]:
         if policy == "auto":
             python_exe = Path(sys.executable).resolve()
             if _python_version_ok(python_exe) and _python_has_runtime_deps(python_exe):
+                _prepare_attention_backend(python_exe, root, allow_install=False)
                 _download_models(python_exe, root)
                 _write_config(root, python_exe)
                 return root, str(python_exe), DEFAULT_TIMEOUT
@@ -345,5 +450,7 @@ def doctor_text() -> str:
     lines.append(f"Timeout: {timeout}")
     lines.append(f"Python >=3.11: {_python_version_ok(python_exe)}")
     lines.append(f"Runtime imports: {_python_has_runtime_deps(python_exe)}")
+    lines.append(f"flash-attn import: {_python_has_module(python_exe, 'flash_attn')}")
+    lines.append(f"Attention backend policy: {_attention_backend()}")
     lines.append(f"Model dirs present: {_has_models(root)}")
     return "\n".join(lines)

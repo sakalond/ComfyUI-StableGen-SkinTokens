@@ -82,8 +82,12 @@ The installer follows the upstream SkinTokens requirements:
 - CUDA-capable NVIDIA GPU with at least 14 GB VRAM
 - PyTorch 2.7.0 / torchvision 0.22.0 / torchaudio 2.7.0
 - `requirements.txt`
-- `flash-attn --no-build-isolation`
 - `python download.py --model`
+
+Upstream recommends `flash-attn`, but Windows builds commonly fail. By default
+`SKINTOKENS_ATTENTION_BACKEND=auto` uses PyTorch SDPA on Windows and only tries
+FlashAttention on other platforms. SDPA is slower and may use more VRAM, but it
+avoids compiling `flash-attn`.
 
 Useful overrides:
 
@@ -91,9 +95,21 @@ Useful overrides:
 SKINTOKENS_BOOTSTRAP_PYTHON=/path/to/python3.11
 SKINTOKENS_TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
 SKINTOKENS_SKIP_TORCH_INSTALL=1
-SKINTOKENS_SKIP_FLASH_ATTN_INSTALL=1
+SKINTOKENS_ATTENTION_BACKEND=auto        # auto | flash_attention_2 | sdpa
+SKINTOKENS_SKIP_FLASH_ATTN_INSTALL=1     # implies SDPA fallback unless flash_attention_2 is forced
 SKINTOKENS_SKIP_MODEL_DOWNLOAD=1
 ```
+
+If you already hit a `flash-attn` build error on Windows, update this node repo
+and rerun:
+
+```bash
+python install_skintokens.py --target managed
+```
+
+The installer will reuse the existing `vendor/SkinTokens` checkout and
+`vendor/skintokens_env`, skip the FlashAttention build, patch TokenRig to SDPA,
+and continue with model download/config.
 
 Upstream SkinTokens:
 

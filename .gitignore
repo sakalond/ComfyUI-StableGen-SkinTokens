@@ -3,6 +3,8 @@ __pycache__/
 .venv/
 venv/
 env/
+vendor/
+skintokens_config.json
 .env
 .ruff_cache/
 *.log

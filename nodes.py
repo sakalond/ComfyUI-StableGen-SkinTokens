@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from .skintokens_runtime import INSTALL_POLICIES, doctor_text, ensure_runtime
+except ImportError:  # pragma: no cover - supports direct `import nodes` checks
+    from skintokens_runtime import INSTALL_POLICIES, doctor_text, ensure_runtime
+
+try:
     import folder_paths  # type: ignore
 except Exception:  # pragma: no cover - only happens outside ComfyUI
     folder_paths = None
@@ -147,6 +152,12 @@ class StableGenSkinTokensAutoRig:
                         "multiline": False,
                     },
                 ),
+                "install_policy": (
+                    INSTALL_POLICIES,
+                    {
+                        "default": "auto",
+                    },
+                ),
                 "use_transfer": ("BOOLEAN", {"default": True}),
                 "use_skeleton": ("BOOLEAN", {"default": False}),
                 "use_postprocess": ("BOOLEAN", {"default": False}),
@@ -190,26 +201,11 @@ class StableGenSkinTokensAutoRig:
         unique = uuid.uuid4().hex[:8]
         return out_dir / f"{prefix}_{stem}_{unique}_rigged.glb"
 
-    def _skintokens_config(self) -> tuple[Path, str, int]:
-        root_raw = os.environ.get("SKINTOKENS_ROOT", "").strip()
-        if not root_raw:
-            raise RuntimeError(
-                "SKINTOKENS_ROOT is not set. Point it at the SkinTokens checkout before starting ComfyUI."
-            )
-
-        root = Path(root_raw).expanduser().resolve()
-        demo = root / "demo.py"
-        if not demo.is_file():
-            raise RuntimeError(f"SkinTokens demo.py was not found at {demo}")
-
-        python_exe = os.environ.get("SKINTOKENS_PYTHON", "").strip() or sys.executable
-        timeout = int(os.environ.get("SKINTOKENS_TIMEOUT", "3600"))
-        return root, python_exe, timeout
-
     def autorig(
         self,
         input_path: str,
         output_prefix: str,
+        install_policy: str,
         use_transfer: bool,
         use_skeleton: bool,
         use_postprocess: bool,
@@ -232,7 +228,7 @@ class StableGenSkinTokensAutoRig:
                 f"SkinTokens supports {', '.join(sorted(SUPPORTED_SUFFIXES))}; got {source_path.suffix}"
             )
 
-        root, python_exe, timeout = self._skintokens_config()
+        root, python_exe, timeout = ensure_runtime(install_policy)
         output_path = self._build_output_path(source_path, output_prefix)
 
         cmd = [
@@ -301,10 +297,35 @@ class StableGenSkinTokensAutoRig:
         return {"ui": {"rigged_glb": [file_ref]}, "result": (str(output_path),)}
 
 
+class StableGenSkinTokensDoctor:
+    """Report SkinTokens runtime status without installing anything."""
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("status",)
+    FUNCTION = "doctor"
+    CATEGORY = "StableGen/3D"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+    @classmethod
+    def IS_CHANGED(cls, *args, **kwargs):
+        return time.time()
+
+    def doctor(self):
+        status = doctor_text()
+        print(status)
+        return {"ui": {"text": [status]}, "result": (status,)}
+
+
 NODE_CLASS_MAPPINGS = {
     "StableGenSkinTokensAutoRig": StableGenSkinTokensAutoRig,
+    "StableGenSkinTokensDoctor": StableGenSkinTokensDoctor,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "StableGenSkinTokensAutoRig": "StableGen SkinTokens AutoRig",
+    "StableGenSkinTokensDoctor": "StableGen SkinTokens Doctor",
 }

@@ -3,24 +3,59 @@
 ComfyUI custom node wrapper for running SkinTokens/TokenRig auto-rigging from
 StableGen TRELLIS.2 workflows.
 
-This package intentionally does not vendor SkinTokens, PyTorch, Blender Python,
-or model weights. Install SkinTokens in a separate Python environment on the
-same machine that runs ComfyUI, then point this node at that environment.
+This package intentionally does not install anything during ComfyUI startup.
+On first node execution it can lazily set up SkinTokens in a separate managed
+environment, or you can run the installer script yourself before using it.
 
 ## Nodes
 
 - `StableGen SkinTokens AutoRig`
+- `StableGen SkinTokens Doctor`
 
 The node accepts a GLB/OBJ/FBX path from an upstream node, calls SkinTokens'
 `demo.py` CLI, and returns a rigged GLB file in ComfyUI's output directory.
 
-## Configuration
+## First-Use Install
 
-Set these environment variables before starting ComfyUI:
+The AutoRig node has an `install_policy` input:
+
+- `auto` (default): use existing config/env if present, try the current ComfyUI
+  Python only if it already has the required packages, otherwise create
+  `vendor/skintokens_env`.
+- `managed`: create/use `vendor/skintokens_env`.
+- `comfy`: explicitly install into the current ComfyUI Python environment.
+- `configured_only`: never install; fail if no config/env is present.
+
+The default `auto` policy does not mutate ComfyUI's Python. The first real
+AutoRig execution may take a long time because it can clone SkinTokens, install
+PyTorch/dependencies, install `flash-attn`, and download model checkpoints.
+
+You can also run the setup explicitly:
+
+```bash
+python install_skintokens.py --target auto
+```
+
+Or force the managed environment:
+
+```bash
+python install_skintokens.py --target managed
+```
+
+To check the runtime without installing:
+
+```bash
+python doctor_skintokens.py
+```
+
+## Manual Configuration
+
+If SkinTokens is already installed elsewhere, set environment variables before
+starting ComfyUI:
 
 ```bash
 SKINTOKENS_ROOT=/path/to/SkinTokens
-SKINTOKENS_PYTHON=/path/to/skintokens-venv/bin/python
+SKINTOKENS_PYTHON=/path/to/python
 ```
 
 Optional:
@@ -30,24 +65,40 @@ SKINTOKENS_TIMEOUT=3600
 SKINTOKENS_OUTPUT_DIR=/path/to/ComfyUI/output
 ```
 
-On Windows, `SKINTOKENS_PYTHON` usually points to:
+Or copy `skintokens_config.example.json` to `skintokens_config.json` and edit
+the paths. Local config is ignored by git.
 
-```powershell
-C:\path\to\skintokens-venv\Scripts\python.exe
-```
-
-## SkinTokens Install Sketch
-
-Follow the upstream SkinTokens instructions for the exact CUDA/PyTorch build:
-
-- https://github.com/VAST-AI-Research/SkinTokens
-- https://huggingface.co/VAST-AI/SkinTokens
-
-The wrapper expects that this works from `SKINTOKENS_ROOT`:
+The wrapper expects that this works:
 
 ```bash
 python demo.py --input example.glb --output rigged.glb --use_transfer
 ```
+
+## Installer Notes
+
+The installer follows the upstream SkinTokens requirements:
+
+- Python >= 3.11
+- CUDA-capable NVIDIA GPU with at least 14 GB VRAM
+- PyTorch 2.7.0 / torchvision 0.22.0 / torchaudio 2.7.0
+- `requirements.txt`
+- `flash-attn --no-build-isolation`
+- `python download.py --model`
+
+Useful overrides:
+
+```bash
+SKINTOKENS_BOOTSTRAP_PYTHON=/path/to/python3.11
+SKINTOKENS_TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
+SKINTOKENS_SKIP_TORCH_INSTALL=1
+SKINTOKENS_SKIP_FLASH_ATTN_INSTALL=1
+SKINTOKENS_SKIP_MODEL_DOWNLOAD=1
+```
+
+Upstream SkinTokens:
+
+- https://github.com/VAST-AI-Research/SkinTokens
+- https://huggingface.co/VAST-AI/SkinTokens
 
 ## StableGen Integration
 

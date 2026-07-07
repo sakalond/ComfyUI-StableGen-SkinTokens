@@ -308,12 +308,45 @@ def _has_models(root: Path) -> bool:
 def _apply_sdpa_attention_patch(root: Path) -> None:
     """Patch SkinTokens to use PyTorch SDPA when flash-attn is unavailable.
 
-    Upstream TokenRig hardcodes Hugging Face `flash_attention_2` and imports
-    `flash_attn` at module import time. That is awkward on Windows, where
-    flash-attn often has to build from source. PyTorch's SDPA is slower and can
-    use more VRAM, but it lets Windows installs proceed without compiling
-    flash-attn.
+    Upstream hardcodes Hugging Face `flash_attention_2` and imports
+    `flash_attn` at module import time in a couple of files. That is awkward on
+    Windows, where flash-attn often has to build from source. PyTorch's SDPA is
+    slower and can use more VRAM, but it lets Windows installs proceed without
+    compiling flash-attn.
     """
+    flash_attn_import_block = (
+        "try:\n"
+        "    from flash_attn_interface import flash_attn_func # type: ignore\n"
+        "except Exception as e:\n"
+        "    from flash_attn.flash_attn_interface import flash_attn_func as _flash_attn_func\n"
+        "    def flash_attn_func(*args, **kwargs):\n"
+        "        res = _flash_attn_func(*args, **kwargs)\n"
+        "        return res, None\n"
+    )
+    sdpa_flash_attn_func = (
+        "def flash_attn_func(*args, **kwargs):\n"
+        "    import torch.nn.functional as _F\n"
+        "    q, k, v = args[:3]\n"
+        "    dropout_p = kwargs.get('dropout_p', 0.0)\n"
+        "    softmax_scale = kwargs.get('softmax_scale', None)\n"
+        "    causal = kwargs.get('causal', False)\n"
+        "    if q.dim() == 4:\n"
+        "        q_t = q.transpose(1, 2)\n"
+        "        k_t = k.transpose(1, 2)\n"
+        "        v_t = v.transpose(1, 2)\n"
+        "        if q_t.shape[1] != k_t.shape[1]:\n"
+        "            repeat_factor = q_t.shape[1] // k_t.shape[1]\n"
+        "            k_t = k_t.repeat_interleave(repeat_factor, dim=1)\n"
+        "            v_t = v_t.repeat_interleave(repeat_factor, dim=1)\n"
+        "        out = _F.scaled_dot_product_attention(\n"
+        "            q_t, k_t, v_t, dropout_p=dropout_p, is_causal=causal, scale=softmax_scale,\n"
+        "        ).transpose(1, 2)\n"
+        "    else:\n"
+        "        out = _F.scaled_dot_product_attention(\n"
+        "            q, k, v, dropout_p=dropout_p, is_causal=causal, scale=softmax_scale,\n"
+        "        )\n"
+        "    return out, None\n"
+    )
     replacements = {
         root / "src" / "model" / "tokenrig.py": [
             (
@@ -321,25 +354,14 @@ def _apply_sdpa_attention_patch(root: Path) -> None:
                 'attn_implementation="sdpa"',
             ),
             (
-                "try: from flash_attn_interface import flash_attn_func # type: ignore except Exception as e: "
-                "from flash_attn.flash_attn_interface import flash_attn_func as _flash_attn_func "
-                "def flash_attn_func(*args, **kwargs): res = _flash_attn_func(*args, **kwargs) return res, None",
-                "def flash_attn_func(*args, **kwargs):\n"
-                "    import torch.nn.functional as _F\n"
-                "    q, k, v = args[:3]\n"
-                "    dropout_p = kwargs.get('dropout_p', 0.0)\n"
-                "    softmax_scale = kwargs.get('softmax_scale', None)\n"
-                "    causal = kwargs.get('causal', False)\n"
-                "    if q.dim() == 4:\n"
-                "        out = _F.scaled_dot_product_attention(\n"
-                "            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),\n"
-                "            dropout_p=dropout_p, is_causal=causal, scale=softmax_scale,\n"
-                "        ).transpose(1, 2)\n"
-                "    else:\n"
-                "        out = _F.scaled_dot_product_attention(\n"
-                "            q, k, v, dropout_p=dropout_p, is_causal=causal, scale=softmax_scale,\n"
-                "        )\n"
-                "    return out, None\n",
+                flash_attn_import_block,
+                sdpa_flash_attn_func,
+            ),
+        ],
+        root / "src" / "model" / "skin_vae_model.py": [
+            (
+                flash_attn_import_block,
+                sdpa_flash_attn_func,
             ),
         ],
         root / "src" / "server" / "spec.py": [

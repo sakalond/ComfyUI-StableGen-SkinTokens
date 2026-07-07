@@ -104,7 +104,9 @@ runtimes before launching `demo.py` and installs supplemental packages such as
 Upstream recommends `flash-attn`, but Windows builds commonly fail. By default
 `SKINTOKENS_ATTENTION_BACKEND=auto` uses PyTorch SDPA on Windows and only tries
 FlashAttention on other platforms. SDPA is slower and may use more VRAM, but it
-avoids compiling `flash-attn`.
+avoids compiling `flash-attn`. The SDPA patch removes upstream FlashAttention
+imports from `tokenrig.py`, `skin_vae_model.py`, and the Hugging Face model
+load path in `server/spec.py`.
 
 Useful overrides:
 

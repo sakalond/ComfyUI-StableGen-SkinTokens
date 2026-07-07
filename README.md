@@ -22,8 +22,9 @@ The AutoRig node has an `install_policy` input:
 - `auto` (default): use existing config/env if present, try the current ComfyUI
   Python only if it already has the required packages, otherwise create
   `vendor/skintokens_env`.
-- `managed`: create/use `vendor/skintokens_env`.
-- `comfy`: explicitly install into the current ComfyUI Python environment.
+- `managed`: create/use and configure `vendor/skintokens_env`.
+- `comfy`: explicitly install into and configure the current ComfyUI Python
+  environment.
 - `configured_only`: never install; fail if no config/env is present.
 
 The default `auto` policy does not mutate ComfyUI's Python. The first real
@@ -71,8 +72,13 @@ the paths. Local config is ignored by git.
 During installation, the node writes `skintokens_config.json` as soon as it has
 chosen a SkinTokens checkout and Python environment. If a later dependency or
 model download step fails, the config remains with `"install_complete": false`.
-Rerunning the installer reuses those paths and flips the flag to `true` once the
-runtime is fully ready.
+Rerunning with `--target auto` reuses complete config/env paths. Rerunning with
+`--target managed` or `--target comfy` refreshes that explicit target and flips
+the flag to `true` once the runtime is fully ready.
+
+Generated config stores node-local managed paths as relative paths such as
+`vendor/skintokens_env`. External Python or SkinTokens paths are written as
+absolute paths.
 
 The wrapper expects that this works:
 

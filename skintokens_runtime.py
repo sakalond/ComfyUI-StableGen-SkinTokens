@@ -91,17 +91,23 @@ def _as_abs(path_value: str | os.PathLike, base: Path = NODE_DIR) -> Path:
     return path.resolve()
 
 
+def _config_path_value(path: Path) -> str:
+    path = path.resolve()
+    try:
+        return str(path.relative_to(NODE_DIR))
+    except ValueError:
+        return str(path)
+
+
 def _write_config(
     root: Path,
     python_exe: Path,
     timeout: int = DEFAULT_TIMEOUT,
     install_complete: bool = True,
 ) -> None:
-    rel_root = os.path.relpath(root, NODE_DIR)
-    rel_python = os.path.relpath(python_exe, NODE_DIR)
     data = {
-        "skintokens_root": rel_root,
-        "python": rel_python,
+        "skintokens_root": _config_path_value(root),
+        "python": _config_path_value(python_exe),
         "timeout": int(timeout),
         "install_complete": bool(install_complete),
     }
@@ -150,6 +156,12 @@ def configured_runtime(require_complete: bool = True) -> tuple[Path, str, int] |
     if not config:
         return None
     return _validate_config(config)
+
+
+def _mark_config_complete(config: tuple[Path, str, int]) -> tuple[Path, str, int]:
+    root, python_exe, timeout = config
+    _write_config(root, Path(python_exe), timeout=timeout, install_complete=True)
+    return root, python_exe, timeout
 
 
 def _ensure_source_repo(root: Path = DEFAULT_SKINTOKENS_ROOT) -> Path:
@@ -362,22 +374,25 @@ def _create_managed_python(venv_dir: Path = DEFAULT_VENV) -> Path:
     return _venv_python(venv_dir).resolve()
 
 
-def _install_managed(root: Path) -> tuple[Path, str, int]:
-    python_exe = _create_managed_python()
+def _finish_install(root: Path, python_exe: Path) -> tuple[Path, str, int]:
     _write_config(root, python_exe, install_complete=False)
-    _install_dependencies(python_exe, root)
+    if _python_version_ok(python_exe) and _python_has_runtime_deps(python_exe):
+        _prepare_attention_backend(python_exe, root, allow_install=False)
+    else:
+        _install_dependencies(python_exe, root)
     _download_models(python_exe, root)
     _write_config(root, python_exe, install_complete=True)
     return root, str(python_exe), DEFAULT_TIMEOUT
+
+
+def _install_managed(root: Path) -> tuple[Path, str, int]:
+    python_exe = _create_managed_python()
+    return _finish_install(root, python_exe)
 
 
 def _install_comfy(root: Path) -> tuple[Path, str, int]:
     python_exe = Path(sys.executable).resolve()
-    _write_config(root, python_exe, install_complete=False)
-    _install_dependencies(python_exe, root)
-    _download_models(python_exe, root)
-    _write_config(root, python_exe, install_complete=True)
-    return root, str(python_exe), DEFAULT_TIMEOUT
+    return _finish_install(root, python_exe)
 
 
 class InstallLock:
@@ -409,9 +424,10 @@ def ensure_runtime(install_policy: str = "auto") -> tuple[Path, str, int]:
     if policy not in INSTALL_POLICIES:
         raise RuntimeError(f"Unknown SkinTokens install policy '{install_policy}'")
 
-    configured = configured_runtime()
-    if configured:
-        return configured
+    if policy in {"auto", "configured_only"}:
+        configured = configured_runtime()
+        if configured:
+            return _mark_config_complete(configured)
 
     if policy == "configured_only":
         raise RuntimeError(
@@ -420,9 +436,10 @@ def ensure_runtime(install_policy: str = "auto") -> tuple[Path, str, int]:
         )
 
     with InstallLock():
-        configured = configured_runtime()
-        if configured:
-            return configured
+        if policy == "auto":
+            configured = configured_runtime()
+            if configured:
+                return _mark_config_complete(configured)
 
         root = _ensure_source_repo()
 
@@ -432,11 +449,7 @@ def ensure_runtime(install_policy: str = "auto") -> tuple[Path, str, int]:
         if policy == "auto":
             python_exe = Path(sys.executable).resolve()
             if _python_version_ok(python_exe) and _python_has_runtime_deps(python_exe):
-                _write_config(root, python_exe, install_complete=False)
-                _prepare_attention_backend(python_exe, root, allow_install=False)
-                _download_models(python_exe, root)
-                _write_config(root, python_exe, install_complete=True)
-                return root, str(python_exe), DEFAULT_TIMEOUT
+                return _finish_install(root, python_exe)
             _log("Falling back to a managed SkinTokens environment.")
 
         return _install_managed(root)
@@ -461,7 +474,11 @@ def doctor_text() -> str:
     lines.append(f"Python: {python_exe}")
     lines.append(f"Timeout: {timeout}")
     if config_data:
-        lines.append(f"Install complete: {config_data.get('install_complete', True)}")
+        recorded = config_data.get("install_complete")
+        if recorded is None:
+            lines.append("Install complete: not recorded (legacy config)")
+        else:
+            lines.append(f"Install complete: {recorded}")
     lines.append(f"Python >=3.11: {_python_version_ok(python_exe)}")
     lines.append(f"Runtime imports: {_python_has_runtime_deps(python_exe)}")
     lines.append(f"flash-attn import: {_python_has_module(python_exe, 'flash_attn')}")

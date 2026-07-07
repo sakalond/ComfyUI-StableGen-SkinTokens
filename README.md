@@ -96,6 +96,11 @@ The installer follows the upstream SkinTokens requirements:
 - `requirements.txt`
 - `python download.py --model`
 
+SkinTokens currently imports a few direct runtime packages that are not all
+declared in upstream `requirements.txt`. The wrapper health-checks configured
+runtimes before launching `demo.py` and installs supplemental packages such as
+`scipy`, `requests`, and `tqdm` when needed.
+
 Upstream recommends `flash-attn`, but Windows builds commonly fail. By default
 `SKINTOKENS_ATTENTION_BACKEND=auto` uses PyTorch SDPA on Windows and only tries
 FlashAttention on other platforms. SDPA is slower and may use more VRAM, but it

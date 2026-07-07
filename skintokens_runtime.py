@@ -20,6 +20,33 @@ DEFAULT_TIMEOUT = 3600
 
 INSTALL_POLICIES = ["auto", "managed", "comfy", "configured_only"]
 ATTENTION_BACKENDS = ["auto", "flash_attention_2", "sdpa"]
+RUNTIME_IMPORTS = [
+    "torch",
+    "transformers",
+    "diffusers",
+    "box",
+    "einops",
+    "omegaconf",
+    "lightning",
+    "addict",
+    "fast_simplification",
+    "bpy",
+    "trimesh",
+    "open3d",
+    "huggingface_hub",
+    "numpy",
+    "gradio",
+    "bottle",
+    "tornado",
+    "scipy",
+    "requests",
+    "tqdm",
+]
+SUPPLEMENTAL_DEPENDENCIES = {
+    "scipy": "scipy",
+    "requests": "requests",
+    "tqdm": "tqdm",
+}
 
 
 def _log(message: str) -> None:
@@ -164,6 +191,34 @@ def _mark_config_complete(config: tuple[Path, str, int]) -> tuple[Path, str, int
     return root, python_exe, timeout
 
 
+def _runtime_is_ready(config: tuple[Path, str, int]) -> bool:
+    root, python_exe, _timeout = config
+    return (
+        _python_version_ok(python_exe)
+        and _python_has_runtime_deps(python_exe)
+        and _has_models(root)
+    )
+
+
+def _ensure_configured_runtime_ready(
+    config: tuple[Path, str, int],
+    allow_install: bool,
+) -> tuple[Path, str, int]:
+    root, python_exe, timeout = config
+    if _runtime_is_ready(config):
+        _prepare_attention_backend(python_exe, root, allow_install=False)
+        return _mark_config_complete(config)
+
+    if not allow_install:
+        raise RuntimeError(
+            "Configured SkinTokens runtime exists but is not ready. "
+            "Run install_skintokens.py --target auto to repair dependencies/models, "
+            "or use install_policy='auto'."
+        )
+
+    return _finish_install(root, Path(python_exe), timeout=timeout)
+
+
 def _ensure_source_repo(root: Path = DEFAULT_SKINTOKENS_ROOT) -> Path:
     if (root / "demo.py").is_file():
         return root.resolve()
@@ -189,28 +244,57 @@ def _python_version_ok(python_exe: str | Path) -> bool:
     return (major, minor) >= (3, 11)
 
 
-def _python_has_runtime_deps(python_exe: str | Path) -> bool:
-    imports = [
-        "torch",
-        "transformers",
-        "diffusers",
-        "bpy",
-        "trimesh",
-        "open3d",
-        "huggingface_hub",
-    ]
-    code = "import " + ", ".join(imports)
+def _runtime_import_failures(python_exe: str | Path) -> list[str]:
+    code = (
+        "import importlib.util\n"
+        f"modules = {json.dumps(RUNTIME_IMPORTS)}\n"
+        "failed = []\n"
+        "for name in modules:\n"
+        "    try:\n"
+        "        found = importlib.util.find_spec(name) is not None\n"
+        "    except Exception as exc:\n"
+        "        failed.append(f'{name}: {type(exc).__name__}: {exc}')\n"
+        "    else:\n"
+        "        if not found:\n"
+        "            failed.append(f'{name}: missing')\n"
+        "if failed:\n"
+        "    print('\\n'.join(failed))\n"
+        "    raise SystemExit(1)\n"
+    )
     result = _run_capture([str(python_exe), "-c", code])
     if result.returncode == 0:
+        return []
+    failures = [line for line in result.stdout.splitlines() if line.strip()]
+    return failures or ["unknown import error"]
+
+
+def _python_has_runtime_deps(python_exe: str | Path) -> bool:
+    failures = _runtime_import_failures(python_exe)
+    if not failures:
         return True
     _log("Current Python is not SkinTokens-ready:")
-    for line in result.stdout.splitlines():
+    for line in failures:
         _log(line)
     return False
 
 
 def _python_has_module(python_exe: str | Path, module: str) -> bool:
-    return _run_capture([str(python_exe), "-c", f"import {module}"]).returncode == 0
+    code = (
+        "import importlib.util, sys\n"
+        f"sys.exit(0 if importlib.util.find_spec({json.dumps(module)}) else 1)\n"
+    )
+    return _run_capture([str(python_exe), "-c", code]).returncode == 0
+
+
+def _install_supplemental_dependencies(python_exe: str | Path) -> None:
+    missing = [
+        package
+        for module, package in SUPPLEMENTAL_DEPENDENCIES.items()
+        if not _python_has_module(python_exe, module)
+    ]
+    if missing:
+        _log(f"Installing supplemental SkinTokens dependencies: {', '.join(missing)}")
+        _run([str(python_exe), "-m", "pip", "install", *missing])
 
 
 def _has_models(root: Path) -> bool:
@@ -347,6 +431,7 @@ def _install_dependencies(python_exe: str | Path, root: Path) -> None:
         ])
 
     _run([str(python_exe), "-m", "pip", "install", "-r", str(root / "requirements.txt")])
+    _install_supplemental_dependencies(python_exe)
     _prepare_attention_backend(python_exe, root, allow_install=True)
 
 
@@ -374,15 +459,22 @@ def _create_managed_python(venv_dir: Path = DEFAULT_VENV) -> Path:
     return _venv_python(venv_dir).resolve()
 
 
-def _finish_install(root: Path, python_exe: Path) -> tuple[Path, str, int]:
-    _write_config(root, python_exe, install_complete=False)
+def _finish_install(
+    root: Path,
+    python_exe: Path,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> tuple[Path, str, int]:
+    _write_config(root, python_exe, timeout=timeout, install_complete=False)
+    if _python_version_ok(python_exe):
+        _install_supplemental_dependencies(python_exe)
+
     if _python_version_ok(python_exe) and _python_has_runtime_deps(python_exe):
         _prepare_attention_backend(python_exe, root, allow_install=False)
     else:
         _install_dependencies(python_exe, root)
     _download_models(python_exe, root)
-    _write_config(root, python_exe, install_complete=True)
-    return root, str(python_exe), DEFAULT_TIMEOUT
+    _write_config(root, python_exe, timeout=timeout, install_complete=True)
+    return root, str(python_exe), timeout
 
 
 def _install_managed(root: Path) -> tuple[Path, str, int]:
@@ -424,22 +516,26 @@ def ensure_runtime(install_policy: str = "auto") -> tuple[Path, str, int]:
     if policy not in INSTALL_POLICIES:
         raise RuntimeError(f"Unknown SkinTokens install policy '{install_policy}'")
 
-    if policy in {"auto", "configured_only"}:
+    if policy == "configured_only":
         configured = configured_runtime()
         if configured:
-            return _mark_config_complete(configured)
+            return _ensure_configured_runtime_ready(configured, allow_install=False)
 
-    if policy == "configured_only":
         raise RuntimeError(
             "SkinTokens runtime is not configured. Run install_skintokens.py, "
             "set SKINTOKENS_ROOT/SKINTOKENS_PYTHON, or choose install_policy='auto'."
         )
 
+    if policy == "auto":
+        configured = configured_runtime()
+        if configured and _runtime_is_ready(configured):
+            return _ensure_configured_runtime_ready(configured, allow_install=True)
+
     with InstallLock():
         if policy == "auto":
             configured = configured_runtime()
             if configured:
-                return _mark_config_complete(configured)
+                return _ensure_configured_runtime_ready(configured, allow_install=True)
 
         root = _ensure_source_repo()
 
@@ -480,7 +576,11 @@ def doctor_text() -> str:
         else:
             lines.append(f"Install complete: {recorded}")
     lines.append(f"Python >=3.11: {_python_version_ok(python_exe)}")
-    lines.append(f"Runtime imports: {_python_has_runtime_deps(python_exe)}")
+    import_failures = _runtime_import_failures(python_exe)
+    lines.append(f"Runtime modules present: {not import_failures}")
+    if import_failures:
+        lines.append("Runtime module failures:")
+        lines.extend(f"- {failure}" for failure in import_failures)
     lines.append(f"flash-attn import: {_python_has_module(python_exe, 'flash_attn')}")
     lines.append(f"Attention backend policy: {_attention_backend()}")
     lines.append(f"Model dirs present: {_has_models(root)}")

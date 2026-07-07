@@ -1,0 +1,8 @@
+GPL-3.0-or-later
+
+This ComfyUI custom node wrapper is distributed under the same license family
+as StableGen. See https://www.gnu.org/licenses/gpl-3.0.html for the full GNU
+General Public License version 3 text.
+
+SkinTokens/TokenRig is not redistributed by this repository. Install it from:
+https://github.com/VAST-AI-Research/SkinTokens

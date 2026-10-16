@@ -156,5 +156,5 @@ download the rigged GLB instead of the raw TRELLIS export.
 
 ## License
 
-GPL-3.0-or-later, matching StableGen. SkinTokens itself is MIT licensed and is
-not redistributed by this package.
+GPL-3.0-or-later (see [LICENSE](LICENSE)), matching StableGen. SkinTokens itself is MIT licensed and is
+not redistributed by this package; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -8,3 +8,4 @@ skintokens_config.json
 .env
 .ruff_cache/
 *.log
+.python-version

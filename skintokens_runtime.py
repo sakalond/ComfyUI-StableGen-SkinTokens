@@ -207,6 +207,7 @@ def _ensure_configured_runtime_ready(
     root, python_exe, timeout = config
     if _runtime_is_ready(config):
         _prepare_attention_backend(python_exe, root, allow_install=False)
+        _apply_progress_markers(root)
         return _mark_config_complete(config)
 
     if not allow_install:
@@ -384,6 +385,141 @@ def _apply_sdpa_attention_patch(root: Path) -> None:
             _log(f"Patched SkinTokens attention backend to SDPA in {path}")
 
 
+def _apply_progress_markers(root: Path) -> None:
+    """Add stable, machine-readable stage markers to upstream demo.py.
+
+    The patch is deliberately small and idempotent. It does not alter model
+    generation or rig results; it only flushes markers immediately before and
+    after SkinTokens' long inference, postprocess, transfer, and export calls.
+    """
+    path = root / "demo.py"
+    if not path.is_file():
+        raise RuntimeError(f"Cannot patch SkinTokens progress markers; missing {path}")
+
+    text = path.read_text(encoding="utf-8")
+    changed = False
+
+    stage_replacements = [
+        (
+            "        preds: List[TokenRigResult] = model.predict_step(\n",
+            "        print(\"[StableGen Progress] inference_start\", flush=True)\n"
+            "        preds: List[TokenRigResult] = model.predict_step(\n",
+        ),
+        (
+            "        asset = preds[0].asset\n",
+            "        print(\"[StableGen Progress] inference_complete\", flush=True)\n"
+            "        asset = preds[0].asset\n",
+        ),
+        (
+            "        if use_postprocess:\n            voxel = asset.voxel(resolution=196)\n",
+            "        if use_postprocess:\n"
+            "            print(\"[StableGen Progress] postprocess_start\", flush=True)\n"
+            "            voxel = asset.voxel(resolution=196)\n",
+        ),
+        (
+            "            asset.normalize_skin()\n",
+            "            asset.normalize_skin()\n"
+            "            print(\"[StableGen Progress] postprocess_complete\", flush=True)\n",
+        ),
+        (
+            "        if use_transfer:\n            payload = dict(\n",
+            "        if use_transfer:\n"
+            "            print(\"[StableGen Progress] transfer_start\", flush=True)\n"
+            "            payload = dict(\n",
+        ),
+        (
+            "            res = post_bpy_payload(\"transfer\", payload)\n        else:\n",
+            "            res = post_bpy_payload(\"transfer\", payload)\n"
+            "            print(\"[StableGen Progress] transfer_complete\", flush=True)\n"
+            "        else:\n"
+            "            print(\"[StableGen Progress] export_start\", flush=True)\n",
+        ),
+        (
+            "        results_out.append(out_path)\n",
+            "        print(\"[StableGen Progress] export_complete\", flush=True)\n"
+            "        results_out.append(out_path)\n",
+        ),
+    ]
+    if "[StableGen Progress] inference_start" not in text:
+        missing = [
+            old.splitlines()[0].strip()
+            for old, _new in stage_replacements
+            if old not in text
+        ]
+        if missing:
+            _log(
+                "SkinTokens demo.py did not match the stage progress patch; "
+                "continuing with subprocess-log progress only. Missing: "
+                f"{', '.join(missing)}"
+            )
+        else:
+            for old, new in stage_replacements:
+                text = text.replace(old, new, 1)
+            changed = True
+
+    token_progress_class = (
+        "from transformers import StoppingCriteria, StoppingCriteriaList\n\n"
+        "class _StableGenProgressCriteria(StoppingCriteria):\n"
+        "    def __init__(self, max_length: int, report_every: int = 8):\n"
+        "        self.max_length = int(max_length)\n"
+        "        self.report_every = max(1, int(report_every))\n"
+        "        self.start_length = None\n"
+        "        self.last_report = 0\n\n"
+        "    def __call__(self, input_ids, scores, **kwargs):\n"
+        "        current_length = int(input_ids.shape[-1])\n"
+        "        if self.start_length is None:\n"
+        "            self.start_length = max(0, current_length - 1)\n"
+        "        generated = max(0, current_length - self.start_length)\n"
+        "        maximum = max(1, self.max_length - self.start_length)\n"
+        "        if generated == 1 or generated - self.last_report >= self.report_every:\n"
+        "            print(\n"
+        "                f\"[StableGen Progress] inference_tokens {generated} {maximum}\",\n"
+        "                flush=True,\n"
+        "            )\n"
+        "            self.last_report = generated\n"
+        "        return False\n\n"
+    )
+    token_replacements = [
+        (
+            "from tqdm import tqdm\n",
+            "from tqdm import tqdm\n" + token_progress_class,
+        ),
+        (
+            "            do_sample=True,\n        )\n",
+            "            do_sample=True,\n"
+            "            stopping_criteria=StoppingCriteriaList([\n"
+            "                _StableGenProgressCriteria(max_length=2048),\n"
+            "            ]),\n"
+            "        )\n",
+        ),
+    ]
+    if "[StableGen Progress] inference_tokens" not in text:
+        missing = [
+            old.splitlines()[0].strip()
+            for old, _new in token_replacements
+            if old not in text
+        ]
+        if missing:
+            _log(
+                "SkinTokens demo.py did not match the token progress patch; "
+                "stage progress remains available. Missing: "
+                f"{', '.join(missing)}"
+            )
+        else:
+            for old, new in token_replacements:
+                text = text.replace(old, new, 1)
+            changed = True
+
+    if not changed:
+        return
+    try:
+        path.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        _log(f"Could not write SkinTokens progress patch to {path}: {exc}")
+        return
+    _log(f"Patched SkinTokens progress reporting in {path}")
+
+
 def _prepare_attention_backend(python_exe: str | Path, root: Path, allow_install: bool) -> None:
     backend = _attention_backend()
     if backend == "sdpa":
@@ -494,6 +630,7 @@ def _finish_install(
         _prepare_attention_backend(python_exe, root, allow_install=False)
     else:
         _install_dependencies(python_exe, root)
+    _apply_progress_markers(root)
     _download_models(python_exe, root)
     _write_config(root, python_exe, timeout=timeout, install_complete=True)
     return root, str(python_exe), timeout

@@ -15,6 +15,19 @@ environment, or you can run the installer script yourself before using it.
 The node accepts a GLB/OBJ/FBX path from an upstream node, calls SkinTokens'
 `demo.py` CLI, and returns a rigged GLB file in ComfyUI's output directory.
 
+## Progress Reporting
+
+The AutoRig node streams SkinTokens output while the subprocess is running and
+publishes both standard ComfyUI progress updates and structured
+`stablegen_skintokens_progress` WebSocket events. StableGen uses these events to
+show runtime preparation, model loading, source import, rig inference, optional
+skin post-processing, weight transfer, and GLB export as separate stages.
+
+On first execution after an update, the runtime helper adds idempotent progress
+print markers to upstream `demo.py`. The markers do not change inference or rig
+results. If an unfamiliar upstream version cannot be patched, auto-rigging still
+runs and falls back to the stages detectable from ordinary subprocess output.
+
 ## First-Use Install
 
 The AutoRig node has an `install_policy` input:
